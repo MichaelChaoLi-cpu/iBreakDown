@@ -85,7 +85,7 @@
 #' @rdname break_down_uncertainty
 break_down_uncertainty <- function(x, ...,
                                    keep_distributions = TRUE,
-                                   B = 10)
+                                   B = 10, clusterNumber = 2)
   UseMethod("break_down_uncertainty")
 
 #' @export
@@ -93,7 +93,7 @@ break_down_uncertainty <- function(x, ...,
 break_down_uncertainty.explainer <- function(x, new_observation,
                        ...,
                        keep_distributions = TRUE,
-                       B = 10) {
+                       B = 10, clusterNumber = 2) {
   # extracts model, data and predict function from the explainer
   model <- x$model
   data <- x$data
@@ -105,7 +105,55 @@ break_down_uncertainty.explainer <- function(x, new_observation,
                      label = label,
                      ...,
                      keep_distributions = keep_distributions,
-                     B = B)
+                     B = B, clusterNumber = clusterNumber)
+}
+
+get_single_random_path <- function(x, data, predict_function, new_observation, label, random_path) {
+  # if predict_function returns a single vector, conrvet it to a data frame
+  if (length(unlist(predict_function(x, new_observation))) > 1) {
+    predict_function_df <- predict_function
+  } else {
+    predict_function_df <- function(...) {
+      tmp <- as.data.frame(predict_function(...))
+      colnames(tmp) = label
+      tmp
+    }
+  }
+
+  vnames <- colnames(data)
+  names(vnames) <- vnames
+  current_data <- data
+
+  yhats <- list()
+  yhats[[1]] <- colMeans(predict_function_df(x, current_data))
+  for (i in seq_along(random_path)) {
+    candidate <- random_path[i]
+    current_data[,candidate] <- new_observation[,candidate]
+    yhats[[i + 1]] <- colMeans(predict_function_df(x, current_data))
+  }
+
+  diffs <- apply(do.call(rbind, yhats), 2, diff)
+  if (is.vector(diffs)) { #93
+    diffs <- t(diffs)
+  }
+  #76
+  new_observation_vec <- sapply(as.data.frame(new_observation), nice_format) # same as in BD
+
+  single_cols <- lapply(1:ncol(diffs), function(col) {
+
+    variable_names <- vnames[random_path]
+    data.frame(
+      variable = paste0(variable_names, " = ",
+                        sapply(new_observation_vec[variable_names], as.character)),
+      contribution = diffs[,col],
+      variable_name = variable_names,
+      variable_value = sapply(new_observation_vec[variable_names], as.character),
+      sign = sign(diffs[,col]),
+      label = ifelse(ncol(diffs) == 1, label, paste(label,colnames(diffs)[col], sep = "."))
+    )
+  })
+
+  do.call(rbind,single_cols)
 }
 
 #' @export
@@ -116,7 +164,7 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
                                ...,
                                path = NULL,
                                keep_distributions = TRUE,
-                               B = 10) {
+                               B = 10, clusterNumber = 2) {
   # here one can add model and data and new observation
   # just in case only some variables are specified
   # this will work only for data.frames
@@ -131,7 +179,33 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
   # start random path
   p <- ncol(data)
   previous_paths <- list()
-  result <- lapply(1:B, function(b) {
+
+  #### original version
+#  result <- lapply(1:B, function(b) {
+#    # ensure each path was previously unused
+#    needs_new_path <- TRUE
+#    while (needs_new_path) {
+#      random_path <- sample(1:p)
+#      # was the path previously used?
+#      needs_new_path <- any(
+#        sapply(previous_paths, function(one_prev_path) {
+#          identical(one_prev_path, random_path)}))
+#    }
+#    previous_paths <- c(previous_paths, list(random_path))
+#    tmp <- get_single_random_path(x, data, predict_function,
+#                                  new_observation, label, random_path)
+#    tmp$B <- b
+#    tmp
+#  })
+
+  #### foreach and doSNOW
+  # current version is for random forest only
+  cl <- makeSOCKcluster(clusterNumber)
+  #clusterExport(cl, "get_single_random_path")
+  doSNOW::registerDoSNOW(cl)
+  opts <- list(progress=progress_fun)
+  result <- foreach::foreach(b = seq(1,B, 1), .combine = 'rbind',
+                        .packages='randomForest', .options.snow=opts) %dopar% {
     # ensure each path was previously unused
     needs_new_path <- TRUE
     while (needs_new_path) {
@@ -142,11 +216,13 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
           identical(one_prev_path, random_path)}))
     }
     previous_paths <- c(previous_paths, list(random_path))
-    tmp <- get_single_random_path(x, data, predict_function,
+    tmp <- iBreakDown::get_single_random_path(x, data, predict_function,
                                   new_observation, label, random_path)
     tmp$B <- b
     tmp
-  })
+                        }
+  stopCluster(cl)
+
   # should we add a specific path?
   if (!is.null(path)) {
     # average or selected path
@@ -192,61 +268,19 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
   result
 }
 
-get_single_random_path <- function(x, data, predict_function, new_observation, label, random_path) {
-  # if predict_function returns a single vector, conrvet it to a data frame
-  if (length(unlist(predict_function(x, new_observation))) > 1) {
-    predict_function_df <- predict_function
-  } else {
-    predict_function_df <- function(...) {
-      tmp <- as.data.frame(predict_function(...))
-      colnames(tmp) = label
-      tmp
-    }
-  }
-
-  vnames <- colnames(data)
-  names(vnames) <- vnames
-  current_data <- data
-
-  yhats <- list()
-  yhats[[1]] <- colMeans(predict_function_df(x, current_data))
-  for (i in seq_along(random_path)) {
-    candidate <- random_path[i]
-    current_data[,candidate] <- new_observation[,candidate]
-    yhats[[i + 1]] <- colMeans(predict_function_df(x, current_data))
-  }
-
-  diffs <- apply(do.call(rbind, yhats), 2, diff)
-  if (is.vector(diffs)) { #93
-    diffs <- t(diffs)
-  }
-  #76
-  new_observation_vec <- sapply(as.data.frame(new_observation), nice_format) # same as in BD
-
-  single_cols <- lapply(1:ncol(diffs), function(col) {
-
-    variable_names <- vnames[random_path]
-    data.frame(
-      variable = paste0(variable_names, " = ",
-                       sapply(new_observation_vec[variable_names], as.character)),
-      contribution = diffs[,col],
-      variable_name = variable_names,
-      variable_value = sapply(new_observation_vec[variable_names], as.character),
-      sign = sign(diffs[,col]),
-      label = ifelse(ncol(diffs) == 1, label, paste(label,colnames(diffs)[col], sep = "."))
-    )
-  })
-
-  do.call(rbind,single_cols)
-}
-
 #' @export
 #' @rdname break_down_uncertainty
-shap <- function(x, ..., B = 25) {
-  ret <- break_down_uncertainty(x, ..., B = B, path = "average")
+shap <- function(x, ..., B = 25, clusterNumber = 4) {
+  ret <- break_down_uncertainty(x, ..., B = B, path = "average", clusterNumber = clusterNumber)
 
   class(ret) <- c("shap", class(ret))
 
   ret
 }
 
+progress_fun <- function(n){
+  cat(n, ' ')
+  if (n%%100==0){
+    cat('\n')
+  }
+}
