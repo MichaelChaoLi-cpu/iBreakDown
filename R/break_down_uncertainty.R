@@ -181,71 +181,83 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
   previous_paths <- list()
 
   #### original version
-#  result <- lapply(1:B, function(b) {
-#    # ensure each path was previously unused
-#    needs_new_path <- TRUE
-#    while (needs_new_path) {
-#      random_path <- sample(1:p)
-#      # was the path previously used?
-#      needs_new_path <- any(
-#        sapply(previous_paths, function(one_prev_path) {
-#          identical(one_prev_path, random_path)}))
-#    }
-#    previous_paths <- c(previous_paths, list(random_path))
-#    tmp <- get_single_random_path(x, data, predict_function,
-#                                  new_observation, label, random_path)
-#    tmp$B <- b
-#    tmp
-#  })
+  if(clusterNumber == 1){
+    result <- lapply(1:B, function(b) {
+      # ensure each path was previously unused
+      needs_new_path <- TRUE
+      while (needs_new_path) {
+        random_path <- sample(1:p)
+        # was the path previously used?
+        needs_new_path <- any(
+          sapply(previous_paths, function(one_prev_path) {
+            identical(one_prev_path, random_path)}))
+      }
+      previous_paths <- c(previous_paths, list(random_path))
+      tmp <- get_single_random_path(x, data, predict_function,
+                                    new_observation, label, random_path)
+      tmp$B <- b
+      tmp
+    })
 
-  #### foreach and doSNOW
-  # current version is for random forest only
-  cl <- makeSOCKcluster(clusterNumber)
-  #clusterExport(cl, "get_single_random_path")
-  doSNOW::registerDoSNOW(cl)
-  opts <- list(progress=progress_fun)
-  result <- foreach::foreach(b = seq(1,B, 1), .combine = 'rbind',
-                        .packages='randomForest', .options.snow=opts) %dopar% {
-    # ensure each path was previously unused
-    needs_new_path <- TRUE
-    while (needs_new_path) {
-      random_path <- sample(1:p)
-      # was the path previously used?
-      needs_new_path <- any(
-        sapply(previous_paths, function(one_prev_path) {
-          identical(one_prev_path, random_path)}))
+    # should we add a specific path?
+    if (!is.null(path)) {
+      # average or selected path
+      if (head(path, 1) == "average") {
+        # let's calculate an average attribution
+        extracted_contributions <- do.call(cbind, lapply(result, function(chunk) {
+          chunk[order(chunk$label, chunk$variable), "contribution"]
+        }))
+        result_average <- result[[1]]
+        result_average <- result_average[order(result_average$label, result_average$variable),]
+        result_average$contribution <- rowMeans(extracted_contributions)
+        result_average$B <- 0
+        result_average$sign <- sign(result_average$contribution)
+        result <- c(list(result_average), result)
+      } else {
+        # path is a selected ordering
+        tmp <- get_single_random_path(x, data, predict_function, new_observation, label, path)
+        tmp$B <- 0
+        result <- c(list(tmp), result)
+      }
     }
-    previous_paths <- c(previous_paths, list(random_path))
-    tmp <- iBreakDown::get_single_random_path(x, data, predict_function,
-                                  new_observation, label, random_path)
-    tmp$B <- b
-    tmp
-                        }
-  stopCluster(cl)
 
-  # should we add a specific path?
-  if (!is.null(path)) {
-    # average or selected path
-    if (head(path, 1) == "average") {
-      # let's calculate an average attribution
-      extracted_contributions <- do.call(cbind, lapply(result, function(chunk) {
-        chunk[order(chunk$label, chunk$variable), "contribution"]
-      }))
-      result_average <- result[[1]]
-      result_average <- result_average[order(result_average$label, result_average$variable),]
-      result_average$contribution <- rowMeans(extracted_contributions)
-      result_average$B <- 0
-      result_average$sign <- sign(result_average$contribution)
-      result <- c(list(result_average), result)
-    } else {
-      # path is a selected ordering
-      tmp <- get_single_random_path(x, data, predict_function, new_observation, label, path)
-      tmp$B <- 0
-      result <- c(list(tmp), result)
-    }
+    result <- do.call(rbind, result)
   }
 
-  result <- do.call(rbind, result)
+  if(clusterNumber > 1){
+    #### foreach and doSNOW
+    # current version is for random forest only
+    cl <- parallel::makeCluster(clusterNumber)
+    doSNOW::registerDoSNOW(cl)
+    opts <- list(progress=progress_fun)
+    result <- foreach::foreach(b = seq(1,B, 1), .combine = 'rbind',
+                               .packages='randomForest', .options.snow=opts) %dopar% {
+                                 # ensure each path was previously unused
+                                 needs_new_path <- TRUE
+                                 while (needs_new_path) {
+                                   random_path <- sample(1:p)
+                                   # was the path previously used?
+                                   needs_new_path <- any(
+                                     sapply(previous_paths, function(one_prev_path) {
+                                       identical(one_prev_path, random_path)}))
+                                 }
+                                 previous_paths <- c(previous_paths, list(random_path))
+                                 tmp <- do.call(get_single_random_path,
+                                                list(x, data, predict_function,
+                                                     new_observation, label, random_path))
+                                 tmp$B <- b
+                                 tmp
+                               }
+    parallel::stopCluster(cl)
+
+    result <- result[,c("contribution", "variable_name")]
+    result <- aggregate(result$contribution, list(result$variable_name), FUN = mean)
+    colnames(result) <- c("variable_name", "contribution")
+
+    result <- as.data.frame(t(result))
+    colnames(result) <- as.character(unlist(result[1,]))
+    result <- result[-1,]
+  }
 
   class(result) <- c("break_down_uncertainty", "data.frame")
 
@@ -284,3 +296,5 @@ progress_fun <- function(n){
     cat('\n')
   }
 }
+
+# Note: currently we just want to get the instance result.
