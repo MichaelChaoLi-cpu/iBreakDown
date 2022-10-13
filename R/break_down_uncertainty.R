@@ -108,28 +108,43 @@ break_down_uncertainty.explainer <- function(x, new_observation,
                      B = B, clusterNumber = clusterNumber)
 }
 
-get_single_random_path <- function(x, data, predict_function, new_observation, label, random_path) {
+get_single_random_path <- function(x, data, predict_function, new_observation,
+                                   label, random_path, clusterNumber) {
+  ###NOTE:
+  ###ML: reduction in loops is extremely hard,
+  ###we move foreach part to this function to reduce the time
+
   # if predict_function returns a single vector, conrvet it to a data frame
-  if (length(unlist(predict_function(x, new_observation))) > 1) {
-    predict_function_df <- predict_function
-  } else {
-    predict_function_df <- function(...) {
-      tmp <- as.data.frame(predict_function(...))
-      colnames(tmp) = label
-      tmp
-    }
-  }
+  #if (length(unlist(predict_function(x, new_observation))) > 1) {
+  #  predict_function_df <- predict_function
+  #} else {
+  #  predict_function_df <- function(...) {
+  #    tmp <- as.data.frame(predict_function(...))
+  #    colnames(tmp) = label
+  #    tmp
+  #  }
+  #} ###ML: test regressor or classifier; useless; drop
+  predict_function_df <- predict_function
 
   vnames <- colnames(data)
   names(vnames) <- vnames
   current_data <- data
 
   yhats <- list()
-  yhats[[1]] <- colMeans(predict_function_df(x, current_data))
-  for (i in seq_along(random_path)) {
+  yhats[[1]] <- mean(predict_function_df(x, current_data))
+  ###ML: revise colMeans to mean
+  cl <- parallel::makeCluster(clusterNumber)
+  doSNOW::registerDoSNOW(cl)
+  opts <- list(progress = progress_fun)
+  yhats.foreach <- foreach::foreach(i = seq_along(random_path), .combine = 'c',
+                                    .packages = 'randomForest') %dopar% {
     candidate <- random_path[i]
     current_data[,candidate] <- new_observation[,candidate]
-    yhats[[i + 1]] <- colMeans(predict_function_df(x, current_data))
+    mean(predict_function_df(x, current_data))
+  } ###ML: numerous prediction
+  parallel::stopCluster(cl)
+  for(j in yhats.foreach) {
+    yhats <- append(yhats, j)
   }
 
   diffs <- apply(do.call(rbind, yhats), 2, diff)
@@ -143,13 +158,8 @@ get_single_random_path <- function(x, data, predict_function, new_observation, l
 
     variable_names <- vnames[random_path]
     data.frame(
-      variable = paste0(variable_names, " = ",
-                        sapply(new_observation_vec[variable_names], as.character)),
       contribution = diffs[,col],
-      variable_name = variable_names,
-      variable_value = sapply(new_observation_vec[variable_names], as.character),
-      sign = sign(diffs[,col]),
-      label = ifelse(ncol(diffs) == 1, label, paste(label,colnames(diffs)[col], sep = "."))
+      variable_name = variable_names
     )
   })
 
@@ -172,7 +182,7 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
     common_variables <- intersect(colnames(new_observation), colnames(data))
     new_observation <- new_observation[1, common_variables, drop = FALSE]
     data <- data[,common_variables, drop = FALSE]
-  }
+  } ###ML: keep only one observation; need to revise
 
   # Now we know the path, so we can calculate contributions
   # set variable indicators
@@ -181,83 +191,90 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
   previous_paths <- list()
 
   #### original version
-  if(clusterNumber == 1){
-    result <- lapply(1:B, function(b) {
-      # ensure each path was previously unused
-      needs_new_path <- TRUE
-      while (needs_new_path) {
-        random_path <- sample(1:p)
-        # was the path previously used?
-        needs_new_path <- any(
-          sapply(previous_paths, function(one_prev_path) {
-            identical(one_prev_path, random_path)}))
-      }
-      previous_paths <- c(previous_paths, list(random_path))
-      tmp <- get_single_random_path(x, data, predict_function,
-                                    new_observation, label, random_path)
-      tmp$B <- b
-      tmp
-    })
+  ###ML10.13: here we go back to original version
 
-    # should we add a specific path?
-    if (!is.null(path)) {
-      # average or selected path
-      if (head(path, 1) == "average") {
-        # let's calculate an average attribution
-        extracted_contributions <- do.call(cbind, lapply(result, function(chunk) {
-          chunk[order(chunk$label, chunk$variable), "contribution"]
-        }))
-        result_average <- result[[1]]
-        result_average <- result_average[order(result_average$label, result_average$variable),]
-        result_average$contribution <- rowMeans(extracted_contributions)
-        result_average$B <- 0
-        result_average$sign <- sign(result_average$contribution)
-        result <- c(list(result_average), result)
-      } else {
-        # path is a selected ordering
-        tmp <- get_single_random_path(x, data, predict_function, new_observation, label, path)
-        tmp$B <- 0
-        result <- c(list(tmp), result)
-      }
+  result <- lapply(1:B, function(b) {
+    # ensure each path was previously unused
+    needs_new_path <- TRUE
+    while (needs_new_path) {
+      random_path <- sample(1:p)
+      # was the path previously used?
+      needs_new_path <- any(
+        sapply(previous_paths, function(one_prev_path) {
+          identical(one_prev_path, random_path)}))
     }
+    previous_paths <- c(previous_paths, list(random_path))
+    cat(b, " ")
+    tmp <- get_single_random_path(x, data, predict_function,
+                                  new_observation, label, random_path, clusterNumber)
+    tmp
+  })
 
-    result <- do.call(rbind, result)
+  # should we add a specific path?
+  if (!is.null(path)) {
+    # average or selected path
+    if (head(path, 1) == "average") {
+      # let's calculate an average attribution
+      extracted_contributions <- do.call(cbind, lapply(result, function(chunk) {
+        chunk[order(chunk$label, chunk$variable), "contribution"]
+      }))
+      result_average <- result[[1]]
+      result_average <- result_average[order(result_average$label, result_average$variable),]
+      result_average$contribution <- rowMeans(extracted_contributions)
+      result_average$B <- 0
+      result_average$sign <- sign(result_average$contribution)
+      result <- c(list(result_average), result)
+    } else {
+      # path is a selected ordering
+      tmp <- get_single_random_path(x, data, predict_function, new_observation, label, path)
+      result <- c(list(tmp), result)
+    }
   }
 
-  if(clusterNumber > 1){
-    #### foreach and doSNOW
-    # current version is for random forest only
-    cl <- parallel::makeCluster(clusterNumber)
-    doSNOW::registerDoSNOW(cl)
-    opts <- list(progress=progress_fun)
-    result <- foreach::foreach(b = seq(1,B, 1), .combine = 'rbind',
-                               .packages='randomForest', .options.snow=opts) %dopar% {
-                                 # ensure each path was previously unused
-                                 needs_new_path <- TRUE
-                                 while (needs_new_path) {
-                                   random_path <- sample(1:p)
-                                   # was the path previously used?
-                                   needs_new_path <- any(
-                                     sapply(previous_paths, function(one_prev_path) {
-                                       identical(one_prev_path, random_path)}))
-                                 }
-                                 previous_paths <- c(previous_paths, list(random_path))
-                                 tmp <- do.call(get_single_random_path,
-                                                list(x, data, predict_function,
-                                                     new_observation, label, random_path))
-                                 tmp$B <- b
-                                 tmp
-                               }
-    parallel::stopCluster(cl)
+  result <- do.call(rbind, result)
 
-    result <- result[,c("contribution", "variable_name")]
-    result <- aggregate(result$contribution, list(result$variable_name), FUN = mean)
-    colnames(result) <- c("variable_name", "contribution")
+  result <- result[,c("contribution", "variable_name")]
+  result <- aggregate(result$contribution, list(result$variable_name), FUN = mean)
+  colnames(result) <- c("variable_name", "contribution")
 
-    result <- as.data.frame(t(result))
-    colnames(result) <- as.character(unlist(result[1,]))
-    result <- result[-1,]
-  }
+  result <- as.data.frame(t(result))
+  colnames(result) <- as.character(unlist(result[1,]))
+  result <- result[-1,]
+
+#  if(clusterNumber > 1){
+#    #### foreach and doSNOW
+#    # current version is for random forest only
+#    cl <- parallel::makeCluster(clusterNumber)
+#    doSNOW::registerDoSNOW(cl)
+#    opts <- list(progress=progress_fun)
+#    result <- foreach::foreach(b = seq(1,B, 1), .combine = 'rbind',
+#                               .packages='randomForest', .options.snow=opts) %dopar% {
+#                                 # ensure each path was previously unused
+#                                 needs_new_path <- TRUE
+#                                 while (needs_new_path) {
+#                                   random_path <- sample(1:p)
+#                                   # was the path previously used?
+#                                   needs_new_path <- any(
+#                                     sapply(previous_paths, function(one_prev_path) {
+#                                       identical(one_prev_path, random_path)}))
+#                                 }
+#                                 previous_paths <- c(previous_paths, list(random_path))
+#                                 tmp <- do.call(get_single_random_path,
+#                                                list(x, data, predict_function,
+#                                                     new_observation, label, random_path))
+#                                 tmp$B <- b
+#                                 tmp
+#                               }
+#    parallel::stopCluster(cl)
+#
+#    result <- result[,c("contribution", "variable_name")]
+#    result <- aggregate(result$contribution, list(result$variable_name), FUN = mean)
+#    colnames(result) <- c("variable_name", "contribution")
+#
+#    result <- as.data.frame(t(result))
+#    colnames(result) <- as.character(unlist(result[1,]))
+#    result <- result[-1,]
+#  }
 
   class(result) <- c("break_down_uncertainty", "data.frame")
 
