@@ -210,27 +210,6 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
     tmp
   })
 
-  # should we add a specific path?
-  if (!is.null(path)) {
-    # average or selected path
-    if (head(path, 1) == "average") {
-      # let's calculate an average attribution
-      extracted_contributions <- do.call(cbind, lapply(result, function(chunk) {
-        chunk[order(chunk$label, chunk$variable), "contribution"]
-      }))
-      result_average <- result[[1]]
-      result_average <- result_average[order(result_average$label, result_average$variable),]
-      result_average$contribution <- rowMeans(extracted_contributions)
-      result_average$B <- 0
-      result_average$sign <- sign(result_average$contribution)
-      result <- c(list(result_average), result)
-    } else {
-      # path is a selected ordering
-      tmp <- get_single_random_path(x, data, predict_function, new_observation, label, path)
-      result <- c(list(tmp), result)
-    }
-  }
-
   result <- do.call(rbind, result)
 
   result <- result[,c("contribution", "variable_name")]
@@ -276,23 +255,23 @@ break_down_uncertainty.default <- function(x, data, predict_function = predict,
 #    result <- result[-1,]
 #  }
 
-  class(result) <- c("break_down_uncertainty", "data.frame")
+#  class(result) <- c("break_down_uncertainty", "data.frame")
 
-  if (keep_distributions) {
-    ## this yhats is not calculated like in breakDown
-    yhats <- list(NULL)
+#  if (keep_distributions) {
+#    ## this yhats is not calculated like in breakDown
+#    yhats <- list(NULL)
+#
+#    yhats_distribution <- calculate_yhats_distribution(x, data, predict_function, label, yhats)
+#
+#    attr(result, "yhats_distribution") <- yhats_distribution
+#  }
 
-    yhats_distribution <- calculate_yhats_distribution(x, data, predict_function, label, yhats)
+#  target_yhat <- predict_function(x, new_observation)
+#  yhatpred <- as.data.frame(predict_function(x, data))
+#  baseline_yhat <- colMeans(yhatpred)
 
-    attr(result, "yhats_distribution") <- yhats_distribution
-  }
-
-  target_yhat <- predict_function(x, new_observation)
-  yhatpred <- as.data.frame(predict_function(x, data))
-  baseline_yhat <- colMeans(yhatpred)
-
-  attr(result, "prediction") <- as.numeric(target_yhat)
-  attr(result, "intercept") <- as.numeric(baseline_yhat)
+#  attr(result, "prediction") <- as.numeric(target_yhat)
+#  attr(result, "intercept") <- as.numeric(baseline_yhat)
 
   result
 }
